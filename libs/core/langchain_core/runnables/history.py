@@ -507,6 +507,80 @@ class RunnableWithMessageHistory(RunnableBindingBase):
         return config
 
 
+class AsyncRunnableWithMessageHistory(RunnableWithMessageHistory):
+    def __init__(
+            self,
+            runnable: Union[
+                Runnable[
+                    Union[MessagesOrDictWithMessages],
+                    Union[str, BaseMessage, MessagesOrDictWithMessages],
+                ],
+                LanguageModelLike,
+            ],
+            get_session_history: GetSessionHistoryCallable,
+            *,
+            input_messages_key: Optional[str] = None,
+            output_messages_key: Optional[str] = None,
+            history_messages_key: Optional[str] = None,
+            history_factory_config: Optional[Sequence[ConfigurableFieldSpec]] = None,
+            **kwargs: Any,
+    ) -> None:
+        history_chain: Runnable = RunnableLambda(
+            self._enter_history, self._aenter_history
+        ).with_config(run_name="load_history")
+        messages_key = history_messages_key or input_messages_key
+        if messages_key:
+            history_chain = RunnablePassthrough.assign(
+                **{messages_key: history_chain}
+            ).with_config(run_name="insert_history")
+        bound = (
+                history_chain | runnable.with_async_listeners(on_end=self._aexit_history)
+        ).with_config(run_name="AsyncRunnableWithMessageHistory")
+
+        if history_factory_config:
+            _config_specs = history_factory_config
+        else:
+            # If not provided, then we'll use the default session_id field
+            _config_specs = [
+                ConfigurableFieldSpec(
+                    id="session_id",
+                    annotation=str,
+                    name="Session ID",
+                    description="Unique identifier for a session.",
+                    default="",
+                    is_shared=True,
+                ),
+            ]
+
+        super().__init__(
+            get_session_history=get_session_history,
+            input_messages_key=input_messages_key,
+            output_messages_key=output_messages_key,
+            bound=bound,
+            history_messages_key=history_messages_key,
+            history_factory_config=_config_specs,
+            **kwargs,
+        )
+
+    async def _aexit_history(self, run: Run, config: RunnableConfig) -> None:
+        hist: BaseChatMessageHistory = config["configurable"]["message_history"]
+
+        # Get the input messages
+        inputs = load(run.inputs)
+        input_messages = self._get_input_messages(inputs)
+
+        # If historic messages were prepended to the input messages, remove them to
+        # avoid adding duplicate messages to history.
+        if not self.history_messages_key:
+            historic_messages = config["configurable"]["message_history"].messages
+            input_messages = input_messages[len(historic_messages):]
+
+        # Get the output messages
+        output_val = load(run.outputs)
+        output_messages = self._get_output_messages(output_val)
+        await hist.aadd_messages(input_messages + output_messages)
+
+
 def _get_parameter_names(callable_: GetSessionHistoryCallable) -> List[str]:
     """Get the parameter names of the callable."""
     sig = inspect.signature(callable_)
