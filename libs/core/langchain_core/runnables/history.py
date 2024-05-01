@@ -552,7 +552,7 @@ class AsyncRunnableWithMessageHistory(RunnableWithMessageHistory):
                 ),
             ]
 
-        super().__init__(
+        RunnableBindingBase.__init__(
             get_session_history=get_session_history,
             input_messages_key=input_messages_key,
             output_messages_key=output_messages_key,
